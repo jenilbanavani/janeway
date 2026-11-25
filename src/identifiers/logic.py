@@ -402,7 +402,9 @@ def create_crossref_issue_context(
             clean_abstract = None
             if clean_abstracts is not None:
                 clean_abstract = clean_abstracts.get(identifier.pk)
-            article_context = create_crossref_article_context(article, identifier, clean_abstract)
+            article_context = create_crossref_article_context(
+                article, identifier, clean_abstract
+            )
             crossref_issue["articles"].append(article_context)
 
     return crossref_issue
@@ -428,7 +430,10 @@ def create_crossref_journal_context(
 
 def create_crossref_article_context(article, identifier=None, clean_abstract=None):
     if clean_abstract is None:
-        clean_abstract = article.get_clean_abstract()
+        if article.abstract and article.scheduled_for_publication:
+            clean_abstract = article.get_clean_abstract()
+        else:
+            clean_abstract = ""
 
     template_context = {
         "id": article.pk,

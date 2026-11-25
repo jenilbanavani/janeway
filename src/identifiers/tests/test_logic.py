@@ -260,7 +260,7 @@ class TestLogic(TestCase):
         expected_data = {
             "title": self.article_one.title,
             "abstract": self.article_one.abstract,
-            "clean_abstract": "<p>Test abstract.</p>",
+            "clean_abstract": "",
             "url": self.article_one.url,
             "authors": [
                 author.email for author in self.article_one.frozenauthor_set.all()
@@ -558,7 +558,9 @@ class TestSendCrossrefDepositValidation(TestCase):
         initial_deposit_count = models.CrossrefDeposit.objects.count()
 
         with mock.patch.object(
-            article, "get_clean_abstract", side_effect=FileNotFoundError("Missing stylesheet")
+            article,
+            "get_clean_abstract",
+            side_effect=FileNotFoundError("Missing stylesheet"),
         ):
             status, error = logic.send_crossref_deposit(
                 test_mode=True, identifiers=[identifier], journal=self.journal
@@ -578,7 +580,9 @@ class TestSendCrossrefDepositValidation(TestCase):
         initial_deposit_count = models.CrossrefDeposit.objects.count()
 
         with mock.patch.object(
-            article, "get_clean_abstract", side_effect=etree.XSLTError("XSLT parsing error")
+            article,
+            "get_clean_abstract",
+            side_effect=etree.XSLTError("XSLT parsing error"),
         ):
             status, error = logic.send_crossref_deposit(
                 test_mode=True, identifiers=[identifier], journal=self.journal
@@ -629,6 +633,79 @@ class TestSendCrossrefDepositValidation(TestCase):
         mock_depositor.return_value.register_doi.assert_not_called()
         self.assertIsInstance(status, str)
         self.assertIsInstance(error, bool)
+
+    def _create_unscheduled_article_with_abstract(
+        self, abstract="<p>Unscheduled abstract content.</p>"
+    ):
+        article = helpers.create_article(self.journal, with_author=True)
+        article.abstract = abstract
+        article.primary_issue = self.issue
+        article.save()
+        self.issue.articles.add(article)
+        identifier = logic.generate_crossref_doi_with_pattern(article)
+        return article, identifier
+
+    def test_unscheduled_article_with_abstract_does_not_convert_abstract_in_batch(self):
+        """Unscheduled articles with abstracts do not call get_clean_abstract() during batch-context generation."""
+        article, identifier = self._create_unscheduled_article_with_abstract()
+        self.assertFalse(article.scheduled_for_publication)
+
+        with mock.patch.object(article, "get_clean_abstract") as mock_convert:
+            context = logic.create_crossref_doi_batch_context(
+                self.journal, set([identifier])
+            )
+            mock_convert.assert_not_called()
+
+        article_context = context["crossref_issues"][0]["articles"][0]
+        self.assertEqual(article_context["clean_abstract"], "")
+        self.assertFalse(article_context["scheduled"])
+
+    def test_scheduled_articles_use_precomputed_clean_abstracts(self):
+        """Scheduled articles use precomputed clean abstracts and do not re-run get_clean_abstract()."""
+        article, identifier = self._create_scheduled_article_with_abstract()
+        self.assertTrue(article.scheduled_for_publication)
+
+        precomputed = {identifier.pk: "<jats:p>Precomputed abstract</jats:p>"}
+        with mock.patch.object(article, "get_clean_abstract") as mock_convert:
+            context = logic.create_crossref_doi_batch_context(
+                self.journal, set([identifier]), clean_abstracts=precomputed
+            )
+            mock_convert.assert_not_called()
+
+        article_context = context["crossref_issues"][0]["articles"][0]
+        self.assertEqual(
+            article_context["clean_abstract"], "<jats:p>Precomputed abstract</jats:p>"
+        )
+        self.assertTrue(article_context["scheduled"])
+
+    def test_create_crossref_article_context_reuses_precomputed_abstract(self):
+        """create_crossref_article_context reuses precomputed abstract without calling get_clean_abstract()."""
+        article, identifier = self._create_scheduled_article_with_abstract()
+
+        with mock.patch.object(article, "get_clean_abstract") as mock_convert:
+            context = logic.create_crossref_article_context(
+                article, identifier, clean_abstract="<jats:p>Already converted</jats:p>"
+            )
+            mock_convert.assert_not_called()
+        self.assertEqual(
+            context["clean_abstract"], "<jats:p>Already converted</jats:p>"
+        )
+
+        # Also when precomputed to an empty string (already converted to empty)
+        with mock.patch.object(article, "get_clean_abstract") as mock_convert:
+            context = logic.create_crossref_article_context(
+                article, identifier, clean_abstract=""
+            )
+            mock_convert.assert_not_called()
+        self.assertEqual(context["clean_abstract"], "")
+
+    def test_create_crossref_article_context_scheduled_converts_when_none(self):
+        """create_crossref_article_context converts abstract if scheduled and clean_abstract is None."""
+        article, identifier = self._create_scheduled_article_with_abstract(
+            "<p>Test scheduled abstract</p>"
+        )
+        context = logic.create_crossref_article_context(article, identifier)
+        self.assertEqual(context["clean_abstract"], "<p>Test scheduled abstract</p>")
 
 
 class TestReviewDoiMinting(TestCase):
